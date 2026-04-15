@@ -17,17 +17,87 @@ Replace this paragraph with your own summary of what your version does.
 
 ## How The System Works
 
-Explain your design in plain language.
+This project simulates how a simple content-based music recommender connects a user's taste to song attributes. Real-world systems combine collaborative signals (other users' behavior), content signals (audio + metadata), and contextual priors; this simulation will focus on content signals (the song's numeric "vibe" features and categorical tags) and a small popularity prior that acts as a fallback.
 
-Some prompts to answer:
+Step 1 — Catalog and extended data
+- I inspected `data/songs.csv` (now 18 songs). Available fields are: id, title, artist, genre, mood, energy, tempo_bpm, valence, danceability, acousticness. I added 8 diverse songs (IDs 11–18) covering classical, metal, reggae, hip hop, country, blues, electronic, and folk so the simulator can exercise different textures and moods.
+- Suggested additional numeric features (optional for later):
+  - instrumentalness (0–1): how much of the track is instrumental (helps separate vocal hip-hop from instrumental ambient)
+  - liveness (0–1): how much the track sounds live vs studio (useful for folk/blues/rock)
+  - speechiness (0–1): presence of spoken words/rap (useful for hip hop / podcasts)
+  - loudness_db (numeric): average loudness in dB (normalize before use)
+  - tempo_variability (0–1): how stable the tempo is (helps detect electronic loops vs human-played tempos)
 
-- What features does each `Song` use in your system
-  - For example: genre, mood, energy, tempo
-- What information does your `UserProfile` store
-- How does your `Recommender` compute a score for each song
-- How do you choose which songs to recommend
+Step 2 — Example UserProfile (taste sketch)
+- name: "Evening Chill"
+- preferred_genres: {lofi, ambient, folk}
+- preferred_moods: {chill, contemplative}
+- numeric_preferences:
+  - energy: 0.35
+  - valence: 0.60
+  - danceability: 0.45
+  - acousticness: 0.85
+  - tempo_bpm: 75   # target BPM (we normalize to dataset tempo range in code)
+- α (content vs popularity) = 0.85  # prefer content matching over popularity
 
-You can include a simple diagram or bullet list if helpful.
+Profile critique: this profile is intentionally specific to favor low-energy, acoustic, contemplative tracks. It will clearly differentiate "intense rock" (energy ~0.9, low acousticness) from "chill lofi" (energy ~0.3–0.4, high acousticness) because numeric features like energy and acousticness are strongly different. However, it may be too narrow if the user also likes occasional higher-energy tracks of a preferred mood; add a per-feature tolerance σ_f or allow multiple preferred_genres to increase flexibility.
+
+Step 3 — Finalized Algorithm Recipe (Scoring + Ranking)
+Overview: For each song S and user profile P we produce a FinalScore(S|P) in [0,1] and return the top-K by FinalScore. FinalScore blends a content-based score with a small popularity prior.
+
+1) Per-feature closeness (numeric features)
+- Normalize numeric features into [0,1] (tempo normalized by dataset min/max or by mapping BPM to perceptual range).
+- Use a Gaussian kernel for closeness:
+  score_f = exp( - (s_f - u_f)^2 / (2 * σ_f^2) )
+  - σ_f controls tolerance. Suggested defaults: σ_energy=0.12, σ_valence=0.15, σ_danceability=0.12, σ_acousticness=0.15, σ_tempo=0.10 (tempo after scaling to 0–1).
+
+2) Categorical matching (genre/mood)
+- genre_match = 1.0 if song.genre ∈ user.preferred_genres else 0.0 (or soft similarity if genres are embedded).
+- mood_match = 1.0 if any mood tag overlaps else 0.0 (or Jaccard for multi-label moods).
+
+3) Per-song ContentScore (combine features)
+- Weighted sum (weights chosen to reflect importance; numeric weights sum to 1 in the numeric block):
+  ContentScore = (W_genre * genre_match + W_mood * mood_match + sum_{f in numeric} w_f * score_f) / Z
+  where Z is the maximum possible (to keep ContentScore in [0,1]).
+
+Suggested weights (starting defaults):
+- W_genre = 0.30   # genre is structural and informative
+- W_mood = 0.12    # mood tags helpful but noisier
+- Numeric block (total = 0.58): energy 0.18, valence 0.15, danceability 0.10, acousticness 0.10, tempo 0.05
+
+Note: these values reflect the small catalog in `data/songs.csv`; genre is deliberately stronger than a single mood tag because genre often encodes instrumentation and production that numeric features don't fully capture.
+
+4) Popularity prior and final blending
+- If PopScore is available (0–1), compute FinalScore = α * ContentScore + (1−α) * PopScore (α from profile or system default e.g., 0.85).
+
+5) Ranking rule and list-level adjustments
+- Sort candidates by FinalScore descending.
+- Optional re-ranking: apply an MMR-style step to improve diversity:
+  pick next item x maximizing λ*FinalScore(x) - (1−λ)*max_{selected y} sim(x,y), with λ≈0.8.
+- Apply simple dedup rules (no more than 2 songs by the same artist in top-10).
+
+Practical scoring example (point form for intuition):
+- +2.0 points for genre match (equivalent to W_genre=0.30 after normalization)
+- +1.0 point for mood match (≈W_mood)
+- numeric closeness contributes up to +2.0 points total (split among features, scaled by closeness)
+- Normalize total to [0,1] for blending with PopScore.
+
+Step 4 — Data flow (visual)
+```mermaid
+flowchart TD
+  A[User Preferences] --> B[Load CSV Catalog]
+  B --> C[For each song: compute per-feature closeness]
+  C --> D[Combine with weights -> ContentScore]
+  D --> E[Blend with PopScore (α)]
+  E --> F[Sort by FinalScore]
+  F --> G[Optional: Diversity re-rank / dedup]
+  G --> H[Top-K Recommendations]
+```
+
+Step 5 — Biases and notes
+- This simple content-based system will naturally favor songs that share explicit genre tags and numeric features with the user; it may under-recommend songs that match mood but not genre (risk: over-prioritize genre). Because the numeric features are hand-tuned and the catalog is small, the model may overfit to the dataset's genre/mood distribution. Be explicit about tolerances (σ_f) so users who like variety can be served more diverse results.
+
+📍Checkpoint: the plan defines the extended catalog, a concrete UserProfile example, the per-song Scoring Rule (Gaussian closeness + categorical boosts), the FinalScore blending (α), and the list-level Ranking Rule (sort + optional MMR). With this, we're ready to implement the scorer and a small re-ranker in code.
 
 ---
 
